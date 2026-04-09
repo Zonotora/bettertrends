@@ -1,0 +1,4 @@
+api_cache/
+trending_*.html
+__pycache__/
+*.pyc

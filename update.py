@@ -5,8 +5,7 @@ update.py — single entry point for the github-trending pipeline.
 Subcommands:
   fetch-trending   Scrape github.com/trending and store results in SQLite.
   fetch-upcoming   Fetch up-and-coming repos via GitHub search API.
-  tag              Apply AI / Agent keyword tags to upcoming repos.
-  themes           Assign broad theme buckets to upcoming repos.
+  tag              Apply keyword tags to upcoming repos.
   render           Build index.html from the database.
   run-all          Run all of the above in order (default when no subcommand given).
 """
@@ -321,16 +320,6 @@ def _init_upcoming_db(conn: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_upcoming_repository_tags_tag
         ON upcoming_repository_tags(tag);
-        CREATE TABLE IF NOT EXISTS upcoming_repository_themes (
-            id INTEGER PRIMARY KEY,
-            repository_id INTEGER NOT NULL REFERENCES upcoming_repositories(id) ON DELETE CASCADE,
-            theme TEXT NOT NULL,
-            matched_terms_json TEXT NOT NULL,
-            created_at_utc TEXT NOT NULL,
-            UNIQUE (repository_id, theme)
-        );
-        CREATE INDEX IF NOT EXISTS idx_upcoming_repository_themes_theme
-        ON upcoming_repository_themes(theme);
     """)
 
 
@@ -421,20 +410,54 @@ def cmd_fetch_upcoming(args: argparse.Namespace) -> None:
 # tag
 # ══════════════════════════════════════════════════════════════════════════════
 
-_AI_PATTERNS = [
-    r"\bai\b", r"artificial intelligence", r"\bllm\b", r"\bml\b", r"machine learning",
-    r"deep learning", r"\bgenai\b", r"generative ai", r"multimodal", r"\binference\b",
-    r"\bembedding[s]?\b", r"\bprompt[s]?\b", r"\bopenai\b", r"\banthropic\b", r"\bclaude\b",
-    r"\bgpt\b", r"\bgemini\b", r"\bollama\b", r"\bcodex\b", r"\bcopilot\b",
-    r"\bdiffusion\b", r"\brag\b",
-]
-_AGENT_PATTERNS = [
-    r"\bagent\b", r"\bagents\b", r"\bagentic\b", r"multi-agent", r"multi agent",
-    r"autonomous agent", r"agent framework", r"agentic framework", r"agent harness",
-    r"agent skills",
-]
-_AI_RE = [re.compile(p, re.IGNORECASE) for p in _AI_PATTERNS]
-_AGENT_RE = [re.compile(p, re.IGNORECASE) for p in _AGENT_PATTERNS]
+_TAGS: dict[str, list[str]] = {
+    "ai": [
+        r"\bai\b", r"artificial intelligence", r"\bllm[s]?\b", r"\bml\b", r"machine learning",
+        r"deep learning", r"\bgenai\b", r"generative ai", r"multimodal", r"\binference\b",
+        r"\bembedding[s]?\b", r"\bprompt[s]?\b", r"\bopenai\b", r"\banthropic\b", r"\bclaude\b",
+        r"\bgpt\b", r"\bgemini\b", r"\bollama\b", r"\bcodex\b", r"\bcopilot\b",
+        r"\bdiffusion\b", r"\brag\b",
+    ],
+    "agent": [
+        r"\bagent\b", r"\bagents\b", r"\bagentic\b", r"multi-agent", r"multi agent",
+        r"autonomous agent", r"agent framework", r"agentic framework", r"agent harness",
+        r"agent skills",
+    ],
+    "devtools": [
+        r"developer", r"devtool", r"\bcli\b", r"\bplugin\b", r"\btoolkit\b", r"\bframework\b",
+        r"\blibrary\b", r"\bsdk\b", r"\beditor\b", r"\bide\b", r"\bcodex\b", r"\bcopilot\b",
+    ],
+    "frontend": [
+        r"\bfrontend\b", r"\bui\b", r"\bux\b", r"\breact\b", r"\btailwind\b",
+        r"\bcomponent\b", r"web app", r"\buikit\b",
+    ],
+    "data": [
+        r"\bresearch\b", r"\bbenchmark\b", r"\bdataset\b", r"\banalytics\b", r"\banalysis\b",
+        r"\bforecast\b", r"\bprediction\b", r"knowledge graph", r"\bevaluation\b",
+    ],
+    "infra": [
+        r"\bdocker\b", r"\bkubernetes\b", r"\bterraform\b", r"\binfra\b", r"\binfrastructure\b",
+        r"\bdeployment\b", r"\bdevops\b", r"\bproxy\b", r"\bcloud\b", r"\bmonitoring\b",
+    ],
+    "security": [
+        r"\bsecurity\b", r"\bprivacy\b", r"\bauth\b", r"\bauthentication\b", r"\bencryption\b",
+        r"\bvulnerability\b", r"\bosint\b", r"\bthreat\b", r"\bcompliance\b",
+    ],
+    "productivity": [
+        r"\bproductivity\b", r"\bmemory\b", r"\bnotes?\b", r"\bknowledge\b", r"\bwiki\b",
+        r"\bdocumentation\b", r"\bdocs\b", r"organi[sz]e", r"\btask\b", r"project management",
+    ],
+    "media": [
+        r"\bvideo\b", r"\baudio\b", r"\bimage\b", r"\bvoice\b", r"\btts\b", r"\bmusic\b",
+        r"\bscreen\b", r"\bcontent\b", r"\bmedia\b",
+    ],
+    "desktop": [
+        r"\bmacos\b", r"\bwindows\b", r"\blinux\b", r"\bdesktop\b", r"\bmobile\b",
+        r"\bandroid\b", r"\bios\b", r"\biphone\b", r"\bipad\b", r"operating system",
+    ],
+}
+_TAG_RE = {tag: [re.compile(p, re.IGNORECASE) for p in patterns]
+           for tag, patterns in _TAGS.items()}
 
 
 def _matched_terms(text: str, regexes: list[re.Pattern]) -> list[str]:
@@ -452,13 +475,14 @@ def cmd_tag(args: argparse.Namespace) -> None:
     with sqlite3.connect(args.db) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
-            "SELECT id, full_name, description, topics_json FROM upcoming_repositories"
+            "SELECT id, full_name, description, language, topics_json FROM upcoming_repositories"
             " WHERE run_id = (SELECT MAX(id) FROM upcoming_runs) ORDER BY overall_rank"
         ).fetchall()
         tag_rows: list[tuple] = []
         for row in rows:
-            text = "\n".join([row["full_name"] or "", row["description"] or "", row["topics_json"] or ""])
-            for tag, regexes in [("ai", _AI_RE), ("agent", _AGENT_RE)]:
+            text = "\n".join([row["full_name"] or "", row["description"] or "",
+                              row["language"] or "", row["topics_json"] or ""])
+            for tag, regexes in _TAG_RE.items():
                 matches = _matched_terms(text, regexes)
                 if matches:
                     tag_rows.append((int(row["id"]), tag, json.dumps(matches, separators=(",", ":")), now))
@@ -472,83 +496,6 @@ def cmd_tag(args: argparse.Namespace) -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# themes
-# ══════════════════════════════════════════════════════════════════════════════
-
-_THEMES: dict[str, list[str]] = {
-    "AI and LLMs": [
-        r"\bai\b", r"artificial intelligence", r"\bllm[s]?\b", r"machine learning",
-        r"deep learning", r"\bgenai\b", r"generative ai", r"\bopenai\b", r"\banthropic\b",
-        r"\bclaude\b", r"\bgpt\b", r"\bgemini\b", r"\bollama\b", r"\brag\b",
-        r"\bembedding[s]?\b", r"\binference\b",
-    ],
-    "Agents and Automation": [
-        r"\bagent\b", r"\bagents\b", r"\bagentic\b", r"automation", r"orchestration",
-        r"workflow", r"swarm", r"multi-agent", r"agent harness", r"agent skills", r"assistant",
-    ],
-    "Developer Tools": [
-        r"developer", r"devtool", r"cli\b", r"plugin", r"toolkit", r"framework",
-        r"library", r"sdk\b", r"editor", r"ide\b", r"code", r"codex", r"copilot", r"spec-driven",
-    ],
-    "Frontend and Design": [
-        r"frontend", r"\bui\b", r"\bux\b", r"design", r"react", r"tailwind",
-        r"component", r"landing page", r"website", r"web app", r"uikit",
-    ],
-    "Data and Research": [
-        r"research", r"benchmark", r"dataset", r"data", r"analytics", r"analysis",
-        r"forecast", r"prediction", r"knowledge graph", r"evaluation", r"science",
-    ],
-    "Infrastructure and DevOps": [
-        r"docker", r"kubernetes", r"terraform", r"infra", r"infrastructure",
-        r"deployment", r"devops", r"server", r"proxy", r"cloud", r"monitoring",
-    ],
-    "Security and Privacy": [
-        r"security", r"privacy", r"auth", r"authentication", r"encryption",
-        r"vulnerability", r"osint", r"threat", r"compliance",
-    ],
-    "Productivity and Knowledge": [
-        r"productivity", r"memory", r"notes?", r"knowledge", r"wiki",
-        r"documentation", r"docs", r"organi[sz]e", r"task", r"project management",
-    ],
-    "Media and Content": [
-        r"video", r"audio", r"image", r"voice", r"tts", r"music", r"screen",
-        r"demo", r"content", r"media", r"render",
-    ],
-    "Desktop Mobile and OS": [
-        r"mac", r"macos", r"windows", r"linux", r"desktop", r"mobile",
-        r"android", r"ios\b", r"iphone", r"ipad", r"operating system",
-    ],
-}
-_THEME_RE = {theme: [re.compile(p, re.IGNORECASE) for p in patterns]
-             for theme, patterns in _THEMES.items()}
-
-
-def cmd_themes(args: argparse.Namespace) -> None:
-    now = datetime.now(UTC).isoformat(timespec="seconds")
-    with sqlite3.connect(args.db) as conn:
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            "SELECT id, full_name, description, language, topics_json FROM upcoming_repositories"
-            " WHERE run_id = (SELECT MAX(id) FROM upcoming_runs) ORDER BY overall_rank"
-        ).fetchall()
-        theme_rows: list[tuple] = []
-        for row in rows:
-            text = "\n".join([row["full_name"] or "", row["description"] or "",
-                              row["language"] or "", row["topics_json"] or ""])
-            for theme, regexes in _THEME_RE.items():
-                matches = _matched_terms(text, regexes)
-                if matches:
-                    theme_rows.append((int(row["id"]), theme, json.dumps(matches, separators=(",", ":")), now))
-        conn.execute("DELETE FROM upcoming_repository_themes")
-        conn.executemany(
-            "INSERT INTO upcoming_repository_themes (repository_id,theme,matched_terms_json,created_at_utc) VALUES (?,?,?,?)",
-            theme_rows,
-        )
-        conn.commit()
-    print(f"themes: {len(theme_rows)} theme assignments across {len(rows)} repos.")
-
-
-# ══════════════════════════════════════════════════════════════════════════════
 # render
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -558,13 +505,11 @@ def _query_repos(conn: sqlite3.Connection) -> list[dict]:
         SELECT base.id, base.overall_rank, base.full_name, base.html_url,
                base.stargazers_count, base.language, base.description,
                base.created_date, base.owner_login,
-               COALESCE(t.tags_json, '[]') AS tags_json,
-               COALESCE(th.themes_json, '[]') AS themes_json
+               COALESCE(t.tags_json, '[]') AS tags_json
         FROM (
             SELECT id, overall_rank, full_name, html_url, stargazers_count,
                    language, description, owner_login,
-                   substr(created_at, 1, 10) AS created_date,
-                   substr(created_at, 1, 7)  AS created_month
+                   substr(created_at, 1, 10) AS created_date
             FROM upcoming_repositories
             WHERE run_id = (SELECT MAX(id) FROM upcoming_runs)
         ) base
@@ -573,17 +518,11 @@ def _query_repos(conn: sqlite3.Connection) -> list[dict]:
             FROM (SELECT repository_id, tag FROM upcoming_repository_tags ORDER BY tag)
             GROUP BY repository_id
         ) t ON t.repository_id = base.id
-        LEFT JOIN (
-            SELECT repository_id, json_group_array(theme) AS themes_json
-            FROM (SELECT repository_id, theme FROM upcoming_repository_themes ORDER BY theme)
-            GROUP BY repository_id
-        ) th ON th.repository_id = base.id
         ORDER BY base.overall_rank
     """).fetchall()
     result = [dict(r) for r in rows]
     for r in result:
         r["tags"] = json.loads(r.pop("tags_json"))
-        r["themes"] = json.loads(r.pop("themes_json"))
     return result
 
 
@@ -604,17 +543,9 @@ def _query_tag_counts(conn: sqlite3.Connection) -> dict[str, int]:
     return {r["tag"]: r["repo_count"] for r in conn.execute(
         """SELECT tag, COUNT(*) AS repo_count FROM upcoming_repository_tags
            WHERE repository_id IN (SELECT id FROM upcoming_repositories WHERE run_id = (SELECT MAX(id) FROM upcoming_runs))
-           GROUP BY tag ORDER BY tag"""
+           GROUP BY tag ORDER BY repo_count DESC, tag"""
     ).fetchall()}
 
-
-def _query_theme_counts(conn: sqlite3.Connection) -> dict[str, int]:
-    conn.row_factory = sqlite3.Row
-    return {r["theme"]: r["repo_count"] for r in conn.execute(
-        """SELECT theme, COUNT(*) AS repo_count FROM upcoming_repository_themes
-           WHERE repository_id IN (SELECT id FROM upcoming_repositories WHERE run_id = (SELECT MAX(id) FROM upcoming_runs))
-           GROUP BY theme ORDER BY repo_count DESC, theme"""
-    ).fetchall()}
 
 
 def _percentile(sv: list[int], p: float) -> int:
@@ -631,37 +562,22 @@ def _build_stats(repos: list[dict]) -> dict:
     languages: Counter = Counter()
     months: Counter = Counter()
     owners: Counter = Counter()
-    theme_counts: Counter = Counter()
-    theme_star_sums: dict = defaultdict(int)
-    tag_overlap: Counter = Counter()
-    theme_overlap: Counter = Counter()
+    tag_counts: Counter = Counter()
+    tag_star_sums: dict = defaultdict(int)
 
     for repo in repos:
         tags = repo["tags"]
-        themes = repo["themes"]
         s = int(repo["stargazers_count"])
         stars.append(s)
         languages[repo["language"] or "Unknown"] += 1
         months[(repo["created_date"] or "")[:7] or "Unknown"] += 1
         owners[repo.get("owner_login") or "Unknown"] += 1
-        has_ai, has_agent = "ai" in tags, "agent" in tags
-        if has_ai and has_agent:
-            tag_overlap["Both"] += 1
-        elif has_ai:
-            tag_overlap["AI only"] += 1
-        elif has_agent:
-            tag_overlap["Agent only"] += 1
-        else:
-            tag_overlap["Neither"] += 1
-        for theme in themes:
-            theme_counts[theme] += 1
-            theme_star_sums[theme] += s
-        for i, ta in enumerate(themes):
-            for tb in themes[i + 1:]:
-                theme_overlap[tuple(sorted((ta, tb)))] += 1
+        for tag in tags:
+            tag_counts[tag] += 1
+            tag_star_sums[tag] += s
 
     stars.sort()
-    theme_avg = {t: round(theme_star_sums[t] / c) for t, c in theme_counts.items()}
+    tag_avg = {t: round(tag_star_sums[t] / c) for t, c in tag_counts.items()}
     return {
         "repo_count": len(repos),
         "avg_stars": round(sum(stars) / len(stars)) if stars else 0,
@@ -670,17 +586,11 @@ def _build_stats(repos: list[dict]) -> dict:
         "p90_stars": _percentile(stars, 0.90),
         "p99_stars": _percentile(stars, 0.99),
         "max_stars": stars[-1] if stars else 0,
-        "top_themes": [{"label": t, "value": c, "avg_stars": theme_avg[t]}
-                       for t, c in theme_counts.most_common(8)],
+        "top_tags": [{"label": t, "value": c, "avg_stars": tag_avg[t]}
+                     for t, c in tag_counts.most_common(10)],
         "top_languages": [{"label": l, "value": c} for l, c in languages.most_common(8)],
         "month_series": [{"label": m, "value": months[m]} for m in sorted(months)],
         "top_owners": [{"label": o, "value": c} for o, c in owners.most_common(8)],
-        "tag_overlap": [{"label": lb, "value": tag_overlap[lb]}
-                        for lb in ["AI only", "Agent only", "Both", "Neither"]],
-        "theme_overlap_pairs": [
-            {"a": a, "b": b, "value": cnt}
-            for (a, b), cnt in sorted(theme_overlap.items(), key=lambda x: (-x[1], x[0][0], x[0][1]))[:20]
-        ],
     }
 
 
@@ -712,8 +622,7 @@ def _bar_chart(title: str, data: list[dict], color: str) -> str:
     )
 
 
-def _build_html(repos: list[dict], summary: dict, tag_counts: dict[str, int],
-                theme_counts: dict[str, int], stats: dict) -> str:
+def _build_html(repos: list[dict], summary: dict, tag_counts: dict[str, int], stats: dict) -> str:
     generated_at = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
 
     payload = json.dumps({
@@ -725,29 +634,25 @@ def _build_html(repos: list[dict], summary: dict, tag_counts: dict[str, int],
             "d": r["description"] or "",
             "c": r["created_date"] or "",
             "t": r["tags"],
-            "th": r["themes"],
         } for r in repos],
         "summary": summary,
         "tag_counts": tag_counts,
-        "theme_counts": theme_counts,
         "stats": {
-            "top_themes": stats["top_themes"],
-            "theme_overlap_pairs": stats["theme_overlap_pairs"],
+            "top_tags": stats["top_tags"],
         },
         "generated_at": generated_at,
     }, separators=(",", ":"))
 
-    theme_buttons = "\n".join(
-        f'          <button class="fchip theme-fchip" data-theme="{theme}">'
-        f'{theme} <span class="fchip-n">{count}</span></button>'
-        for theme, count in theme_counts.items()
+    tag_buttons = "\n".join(
+        f'          <button class="fchip tag-fchip" data-tag="{tag}">'
+        f'{tag} <span class="fchip-n">{count}</span></button>'
+        for tag, count in tag_counts.items()
     )
 
     charts_html = (
-        _bar_chart("Top themes by repo count", stats["top_themes"], "#f97316")
+        _bar_chart("Top tags by repo count", stats["top_tags"], "#f97316")
         + _bar_chart("Top languages", stats["top_languages"], "#34d399")
         + _bar_chart("Created by month", stats["month_series"], "#a78bfa")
-        + _bar_chart("AI / Agent tag overlap", stats["tag_overlap"], "#fbbf24")
         + _bar_chart("Top owners", stats["top_owners"], "#f472b6")
     )
 
@@ -866,14 +771,6 @@ def _build_html(repos: list[dict], summary: dict, tag_counts: dict[str, int],
     .b-fill {{ height: 100%; }}
     .b-val {{ color: var(--text); font-variant-numeric: tabular-nums; text-align: right; }}
     .b-meta {{ color: var(--muted); font-size: 0.72rem; white-space: nowrap; }}
-    .overlap-panel {{ background: var(--surface); border: 1px solid var(--border);
-                      border-radius: 4px; padding: 16px 18px; }}
-    .overlap-row {{ display: grid; grid-template-columns: 1fr 1fr 60px; gap: 10px;
-                    align-items: center; padding: 6px 0; border-bottom: 1px solid var(--border);
-                    font-size: 0.82rem; }}
-    .overlap-row:last-child {{ border-bottom: none; }}
-    .overlap-theme {{ color: var(--accent); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
-    .overlap-count {{ text-align: right; font-variant-numeric: tabular-nums; color: var(--text); }}
     .scatter-panel {{ background: var(--surface); border: 1px solid var(--border);
                       border-radius: 4px; padding: 16px 18px; margin-bottom: 24px; }}
     .scatter-controls {{ display: flex; gap: 14px; flex-wrap: wrap; margin-bottom: 14px; }}
@@ -931,16 +828,9 @@ def _build_html(repos: list[dict], summary: dict, tag_counts: dict[str, int],
           <input class="search-input" id="search" type="search" placeholder="repo, owner, language, tag…">
         </div>
         <div>
-          <div class="toolbar-label">Tag</div>
+          <div class="toolbar-label">Tags</div>
           <div class="fchip-group">
-            <button class="fchip" id="filter-ai" type="button">ai <span class="fchip-n">{tag_counts.get("ai", 0)}</span></button>
-            <button class="fchip" id="filter-agent" type="button">agent <span class="fchip-n">{tag_counts.get("agent", 0)}</span></button>
-          </div>
-        </div>
-        <div>
-          <div class="toolbar-label">Theme</div>
-          <div class="fchip-group">
-{theme_buttons}
+{tag_buttons}
           </div>
         </div>
         <div>
@@ -953,7 +843,7 @@ def _build_html(repos: list[dict], summary: dict, tag_counts: dict[str, int],
       </div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>#</th><th>repository</th><th>language</th><th>created</th><th>tags / themes</th><th>stars</th></tr></thead>
+          <thead><tr><th>#</th><th>repository</th><th>language</th><th>created</th><th>tags</th><th>stars</th></tr></thead>
           <tbody id="repo-body"></tbody>
         </table>
       </div>
@@ -970,17 +860,13 @@ def _build_html(repos: list[dict], summary: dict, tag_counts: dict[str, int],
       </div>
       <div class="charts-grid">
 {charts_html}
-        <div class="overlap-panel">
-          <div class="panel-title">Theme co-occurrence (top pairs)</div>
-          <div id="overlap-matrix"></div>
-        </div>
       </div>
       <div class="scatter-panel">
         <div class="panel-title">Stars vs. creation time</div>
         <div class="scatter-controls">
           <div class="ctrl-wrap">
-            <div class="toolbar-label">Theme</div>
-            <select class="ctrl-select" id="sc-theme"><option value="">all themes</option></select>
+            <div class="toolbar-label">Tag</div>
+            <select class="ctrl-select" id="sc-tag"><option value="">all tags</option></select>
           </div>
           <div class="ctrl-wrap">
             <div class="toolbar-label">Language</div>
@@ -1014,11 +900,9 @@ def _build_html(repos: list[dict], summary: dict, tag_counts: dict[str, int],
       created_date: r.c,
       created_month: r.c.slice(0, 7),
       tags: r.t,
-      themes: r.th,
     }}));
     const maxStars = P.summary.max_stars;
-    const overlapPairs = P.stats.theme_overlap_pairs;
-    const topThemes = P.stats.top_themes;
+    const topTags = P.stats.top_tags;
 
     document.querySelectorAll('.tab').forEach(btn => {{
       btn.addEventListener('click', () => {{
@@ -1033,12 +917,8 @@ def _build_html(repos: list[dict], summary: dict, tag_counts: dict[str, int],
     const tbody = document.getElementById('repo-body');
     const searchInput = document.getElementById('search');
     const visibleCount = document.getElementById('visible-count');
-    const filterAi = document.getElementById('filter-ai');
-    const filterAgent = document.getElementById('filter-agent');
     const filterLang = document.getElementById('filter-lang');
     const activeTags = new Set();
-    const activeThemes = new Set();
-    const themeChips = [...document.querySelectorAll('.theme-fchip')];
 
     const allLangs = [...new Set(repos.map(r => r.language).filter(Boolean))].sort();
     allLangs.forEach(lang => {{
@@ -1051,14 +931,13 @@ def _build_html(repos: list[dict], summary: dict, tag_counts: dict[str, int],
 
     function buildRow(repo) {{
       const tr = document.createElement('tr');
-      tr.dataset.search = (repo.full_name + ' ' + repo.language + ' ' + repo.tags.join(' ') + ' ' + repo.themes.join(' ')).toLowerCase();
+      tr.dataset.search = (repo.full_name + ' ' + repo.language + ' ' + repo.tags.join(' ')).toLowerCase();
       tr.dataset.tags = repo.tags.join(',');
-      tr.dataset.themes = repo.themes.join('|');
       tr.dataset.lang = repo.language;
       const width = Math.max(2, (repo.stargazers_count / maxStars) * 100);
-      let tagStr = '';
-      if (repo.tags.length) tagStr += repo.tags.map(t => `<span class="tag">${{t}}</span>`).join(' ');
-      if (repo.themes.length) {{ if (tagStr) tagStr += '  '; tagStr += repo.themes.join(', '); }}
+      const tagStr = repo.tags.length
+        ? repo.tags.map(t => `<span class="tag">${{t}}</span>`).join(' ')
+        : '<span style="color:var(--border)">—</span>';
       tr.innerHTML = `
         <td class="td-rank">${{repo.overall_rank}}</td>
         <td>
@@ -1067,7 +946,7 @@ def _build_html(repos: list[dict], summary: dict, tag_counts: dict[str, int],
         </td>
         <td class="td-lang">${{repo.language}}</td>
         <td class="td-created">${{repo.created_date}}</td>
-        <td class="inline-tags">${{tagStr || '<span style="color:var(--border)">—</span>'}}</td>
+        <td class="inline-tags">${{tagStr}}</td>
         <td>
           <div class="stars-bar-wrap">
             <div class="stars-bar-track"><div class="stars-bar-fill" style="width:${{width.toFixed(1)}}%"></div></div>
@@ -1086,10 +965,8 @@ def _build_html(repos: list[dict], summary: dict, tag_counts: dict[str, int],
       let n = 0;
       rows.forEach(row => {{
         const rowTags = row.dataset.tags ? row.dataset.tags.split(',').filter(Boolean) : [];
-        const rowThemes = row.dataset.themes ? row.dataset.themes.split('|').filter(Boolean) : [];
         const ok = (!q || row.dataset.search.includes(q))
           && (activeTags.size === 0 || [...activeTags].every(t => rowTags.includes(t)))
-          && (activeThemes.size === 0 || [...activeThemes].every(t => rowThemes.includes(t)))
           && (!lang || row.dataset.lang === lang);
         row.classList.toggle('hidden', !ok);
         if (ok) n++;
@@ -1103,32 +980,18 @@ def _build_html(repos: list[dict], summary: dict, tag_counts: dict[str, int],
       applyFilter();
     }}
 
-    function toggleTheme(theme, btn) {{
-      activeThemes.has(theme) ? activeThemes.delete(theme) : activeThemes.add(theme);
-      btn.classList.toggle('active', activeThemes.has(theme));
-      applyFilter();
-    }}
-
     searchInput.addEventListener('input', applyFilter);
     filterLang.addEventListener('change', applyFilter);
-    filterAi.addEventListener('click', () => toggleTag('ai', filterAi));
-    filterAgent.addEventListener('click', () => toggleTag('agent', filterAgent));
-    themeChips.forEach(btn => btn.addEventListener('click', () => toggleTheme(btn.dataset.theme, btn)));
+    document.querySelectorAll('.tag-fchip').forEach(btn => {{
+      btn.addEventListener('click', () => toggleTag(btn.dataset.tag, btn));
+    }});
 
-    document.getElementById('overlap-matrix').innerHTML =
-      overlapPairs.slice(0, 12).map(p => `
-        <div class="overlap-row">
-          <div class="overlap-theme">${{p.a}}</div>
-          <div class="overlap-theme">${{p.b}}</div>
-          <div class="overlap-count">${{fmtInt(p.value)}}</div>
-        </div>`).join('');
-
-    const scTheme = document.getElementById('sc-theme');
+    const scTag = document.getElementById('sc-tag');
     const scLang = document.getElementById('sc-lang');
-    topThemes.forEach(item => {{
+    topTags.forEach(item => {{
       const opt = document.createElement('option');
       opt.value = item.label; opt.textContent = item.label;
-      scTheme.appendChild(opt);
+      scTag.appendChild(opt);
     }});
     [...new Set(repos.map(r => r.language))].sort().forEach(l => {{
       const opt = document.createElement('option');
@@ -1140,8 +1003,8 @@ def _build_html(repos: list[dict], summary: dict, tag_counts: dict[str, int],
     function renderScatter() {{
       if (!scatterDirty) return;
       scatterDirty = false;
-      const theme = scTheme.value, lang = scLang.value;
-      const filtered = repos.filter(r => (!theme || r.themes.includes(theme)) && (!lang || r.language === lang));
+      const tag = scTag.value, lang = scLang.value;
+      const filtered = repos.filter(r => (!tag || r.tags.includes(tag)) && (!lang || r.language === lang));
       const svg = document.getElementById('scatter');
       const W = 1400, H = 380, pad = {{ l:64, r:20, t:20, b:38 }};
       const iW = W - pad.l - pad.r, iH = H - pad.t - pad.b;
@@ -1164,7 +1027,7 @@ def _build_html(repos: list[dict], summary: dict, tag_counts: dict[str, int],
         + monthLabels + circles;
     }}
 
-    scTheme.addEventListener('change', () => {{ scatterDirty = true; renderScatter(); }});
+    scTag.addEventListener('change', () => {{ scatterDirty = true; renderScatter(); }});
     scLang.addEventListener('change', () => {{ scatterDirty = true; renderScatter(); }});
   }})();
   </script>
@@ -1177,11 +1040,10 @@ def cmd_render(args: argparse.Namespace) -> None:
         repos = _query_repos(conn)
         summary = _query_summary(conn)
         tag_counts = _query_tag_counts(conn)
-        theme_counts = _query_theme_counts(conn)
     if not repos:
         raise RuntimeError("No rows in upcoming_repositories.")
     stats = _build_stats(repos)
-    html = _build_html(repos, summary, tag_counts, theme_counts, stats)
+    html = _build_html(repos, summary, tag_counts, stats)
     args.output.write_text(html, encoding="utf-8")
     print(f"render: wrote {args.output}")
 
@@ -1213,10 +1075,7 @@ def main() -> int:
     p_fu.add_argument("--cache-only", action="store_true")
 
     # tag
-    sub.add_parser("tag", help="Apply AI/Agent tags.")
-
-    # themes
-    sub.add_parser("themes", help="Assign theme buckets.")
+    sub.add_parser("tag", help="Apply keyword tags.")
 
     # render
     p_r = sub.add_parser("render", help="Build index.html.")
@@ -1257,15 +1116,12 @@ def main() -> int:
         cmd_fetch_upcoming(args)
     elif args.cmd == "tag":
         cmd_tag(args)
-    elif args.cmd == "themes":
-        cmd_themes(args)
     elif args.cmd == "render":
         cmd_render(args)
     elif args.cmd == "run-all":
         cmd_fetch_trending(args)
         cmd_fetch_upcoming(args)
         cmd_tag(args)
-        cmd_themes(args)
         cmd_render(args)
 
     return 0

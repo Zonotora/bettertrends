@@ -750,6 +750,15 @@ def _build_html(repos: list[dict], summary: dict, tag_counts: dict[str, int], st
     .stars-val {{ font-variant-numeric: tabular-nums; color: var(--text); font-size: 0.82rem; }}
     .hidden {{ display: none !important; }}
 
+    /* row tooltip */
+    .row-tooltip {{ position: fixed; z-index: 999; pointer-events: none;
+                    background: var(--surface); border: 1px solid var(--border);
+                    color: var(--text); font-size: 0.8rem; line-height: 1.5;
+                    padding: 8px 12px; border-radius: 4px; max-width: 380px;
+                    white-space: normal; word-break: break-word;
+                    box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+                    opacity: 0; transition: opacity 0.1s; }}
+
     /* stats */
     .stats-grid {{ display: grid; grid-template-columns: repeat(6,minmax(0,1fr)); gap: 1px;
                    background: var(--border); border: 1px solid var(--border);
@@ -885,6 +894,7 @@ def _build_html(repos: list[dict], summary: dict, tag_counts: dict[str, int], st
 
     <footer class="footer">source: <code>github_trending.db</code> · generated {generated_at}</footer>
   </div>
+  <div class="row-tooltip" id="row-tooltip"></div>
 
   <script id="payload" type="application/json">{payload}</script>
   <script>
@@ -958,6 +968,22 @@ def _build_html(repos: list[dict], summary: dict, tag_counts: dict[str, int], st
 
     const rows = repos.map(buildRow);
     rows.forEach(r => tbody.appendChild(r));
+
+    const tooltip = document.getElementById('row-tooltip');
+    rows.forEach((tr, i) => {{
+      const desc = repos[i].description;
+      if (!desc) return;
+      tr.addEventListener('mouseenter', () => {{ tooltip.textContent = desc; tooltip.style.opacity = '1'; }});
+      tr.addEventListener('mouseleave', () => {{ tooltip.style.opacity = '0'; }});
+      tr.addEventListener('mousemove', e => {{
+        const pad = 14;
+        let x = e.clientX + pad, y = e.clientY + pad;
+        if (x + 380 > window.innerWidth) x = e.clientX - 380 - pad;
+        if (y + tooltip.offsetHeight > window.innerHeight) y = e.clientY - tooltip.offsetHeight - pad;
+        tooltip.style.left = x + 'px';
+        tooltip.style.top  = y + 'px';
+      }});
+    }});
 
     function applyFilter() {{
       const q = searchInput.value.trim().toLowerCase();

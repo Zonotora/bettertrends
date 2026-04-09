@@ -780,7 +780,10 @@ def _build_html(repos: list[dict], summary: dict, tag_counts: dict[str, int],
 
     /* header */
     .header {{ border-bottom: 1px solid var(--border); padding-bottom: 16px; margin-bottom: 24px; }}
-    .header-top {{ display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; }}
+    .header-top {{ display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; flex: 1; }}
+    .header-row {{ display: flex; align-items: center; justify-content: space-between; }}
+    .gh-link {{ font-size: 0.78rem; color: var(--muted); text-decoration: none; white-space: nowrap; }}
+    .gh-link:hover {{ color: var(--text); }}
     .site-title {{ font-size: 1.25rem; font-weight: 700; color: var(--accent); letter-spacing: -0.02em; }}
     .site-subtitle {{ color: var(--muted); font-size: 0.85rem; }}
     .header-meta {{ margin-top: 8px; display: flex; gap: 24px; flex-wrap: wrap; font-size: 0.8rem; color: var(--muted); }}
@@ -901,9 +904,12 @@ def _build_html(repos: list[dict], summary: dict, tag_counts: dict[str, int],
 <body>
   <div class="page">
     <header class="header">
-      <div class="header-top">
-        <span class="site-title">bettertrends</span>
-        <span class="site-subtitle">trending github repositories</span>
+      <div class="header-row">
+        <div class="header-top">
+          <span class="site-title">bettertrends</span>
+          <span class="site-subtitle">trending github repositories</span>
+        </div>
+        <a class="gh-link" href="https://github.com/Zonotora/bettertrends" target="_blank" rel="noreferrer">github.com/Zonotora/bettertrends</a>
       </div>
       <div class="header-meta">
         <span><span class="meta-val">{_fmt(summary["repo_count"])}</span> repos</span>
